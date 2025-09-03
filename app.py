@@ -1,155 +1,194 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
-from datetime import datetime
 import os
-from dotenv import load_dotenv
-import sqlite3
+from flask import Flask, render_template, request, redirect, url_for, flash, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+import logging
 
-load_dotenv()
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URI', 'sqlite:///instance/school.db')
+app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-123')
+
+# Database configuration
+database_url = os.environ.get('DATABASE_URL', 'sqlite:///school.db')
+
+# Fix for Render PostgreSQL URL (postgres:// -> postgresql://)
+if database_url and database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# Ensure instance directory exists
-os.makedirs('instance', exist_ok=True)
-
 db = SQLAlchemy(app)
-login_manager = LoginManager(app)
-login_manager.login_view = 'login'
 
-# Database Models
-class User(UserMixin, db.Model):
+# Models
+class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
-    role = db.Column(db.String(20), nullable=False, default='admin')
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)
+    role = db.Column(db.String(20), nullable=False)  # admin, teacher, student
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
 
 class Student(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(100), unique=True)
-    class_name = db.Column(db.String(20), nullable=False)
-    section = db.Column(db.String(10), nullable=False)
-    parent_name = db.Column(db.String(100))
-    contact_number = db.Column(db.String(15))
-    date_created = db.Column(db.DateTime, default=datetime.utcnow)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    first_name = db.Column(db.String(50), nullable=False)
+    last_name = db.Column(db.String(50), nullable=False)
+    date_of_birth = db.Column(db.Date, nullable=False)
+    grade = db.Column(db.String(10), nullable=False)
+    parent_contact = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('student', uselist=False))
 
 class Teacher(db.Model):
     id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    first_name = db.Column(db.String(50), nullable=False)
+    last_name = db.Column(db.String(50), nullable=False)
+    subject = db.Column(db.String(50), nullable=False)
+    contact_info = db.Column(db.String(100), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    user = db.relationship('User', backref=db.backref('teacher', uselist=False))
+
+class Course(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
-    email = db.Column(db.String(100), unique=True)
-    subject = db.Column(db.String(50))
-    class_name = db.Column(db.String(20))
-    contact_number = db.Column(db.String(15))
-    date_created = db.Column(db.DateTime, default=datetime.utcnow)
+    code = db.Column(db.String(20), unique=True, nullable=False)
+    description = db.Column(db.Text)
+    teacher_id = db.Column(db.Integer, db.ForeignKey('teacher.id'), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-@login_manager.user_loader
-def load_user(user_id):
-    return User.query.get(int(user_id))
+    teacher = db.relationship('Teacher', backref=db.backref('courses', lazy=True))
 
-# Initialize database tables
+class Enrollment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('student.id'), nullable=False)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=False)
+    enrollment_date = db.Column(db.DateTime, default=datetime.utcnow)
+    grade = db.Column(db.String(5), nullable=True)
+
+    student = db.relationship('Student', backref=db.backref('enrollments', lazy=True))
+    course = db.relationship('Course', backref=db.backref('enrollments', lazy=True))
+
 def init_db():
-    with app.app_context():
+    """Initialize database with proper error handling"""
+    try:
+        # Create tables
         db.create_all()
-        # Create default admin user if it doesn't exist
+        logger.info("Database tables created successfully")
+        
+        # Create admin user if not exists
         if not User.query.filter_by(username='admin').first():
-            admin = User(username='admin', password='admin123', role='admin')
-            db.session.add(admin)
+            admin_user = User(
+                username='admin',
+                email='admin@school.com',
+                role='admin'
+            )
+            admin_user.set_password('admin123')
+            db.session.add(admin_user)
             db.session.commit()
-        print("Database initialized successfully!")
+            logger.info("Admin user created")
+            
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+        db.session.rollback()
 
-# Call init_db when the app starts
-init_db()
-
+# Routes
 @app.route('/')
-@login_required
-def dashboard():
-    student_count = Student.query.count()
-    teacher_count = Teacher.query.count()
-    return render_template('dashboard.html', 
-                          student_count=student_count, 
-                          teacher_count=teacher_count)
+def index():
+    return render_template('index.html')
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
+        username = request.form.get('username')
+        password = request.form.get('password')
+        
         user = User.query.filter_by(username=username).first()
-        if user and user.password == password:
-            login_user(user)
+        
+        if user and user.check_password(password):
+            flash('Login successful!', 'success')
             return redirect(url_for('dashboard'))
         else:
-            flash('Invalid credentials')
+            flash('Invalid credentials', 'error')
+    
     return render_template('login.html')
 
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    return redirect(url_for('login'))
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        role = request.form.get('role')
+        
+        if User.query.filter_by(username=username).first():
+            flash('Username already exists', 'error')
+            return redirect(url_for('register'))
+        
+        if User.query.filter_by(email=email).first():
+            flash('Email already exists', 'error')
+            return redirect(url_for('register'))
+        
+        new_user = User(username=username, email=email, role=role)
+        new_user.set_password(password)
+        
+        db.session.add(new_user)
+        db.session.commit()
+        
+        flash('Registration successful! Please login.', 'success')
+        return redirect(url_for('login'))
+    
+    return render_template('register.html')
+
+@app.route('/dashboard')
+def dashboard():
+    return render_template('dashboard.html')
 
 @app.route('/students')
-@login_required
 def students():
-    all_students = Student.query.all()
-    return render_template('students.html', students=all_students)
-
-@app.route('/add_student', methods=['POST'])
-@login_required
-def add_student():
-    name = request.form['name']
-    email = request.form['email']
-    class_name = request.form['class']
-    section = request.form['section']
-    parent_name = request.form['parent_name']
-    contact_number = request.form['contact_number']
-    
-    new_student = Student(
-        name=name,
-        email=email,
-        class_name=class_name,
-        section=section,
-        parent_name=parent_name,
-        contact_number=contact_number
-    )
-    
-    db.session.add(new_student)
-    db.session.commit()
-    flash('Student added successfully!')
-    return redirect(url_for('students'))
+    students = Student.query.all()
+    return render_template('students.html', students=students)
 
 @app.route('/teachers')
-@login_required
 def teachers():
-    all_teachers = Teacher.query.all()
-    return render_template('teachers.html', teachers=all_teachers)
+    teachers = Teacher.query.all()
+    return render_template('teachers.html', teachers=teachers)
 
-@app.route('/add_teacher', methods=['POST'])
-@login_required
-def add_teacher():
-    name = request.form['name']
-    email = request.form['email']
-    subject = request.form['subject']
-    class_name = request.form['class']
-    contact_number = request.form['contact_number']
-    
-    new_teacher = Teacher(
-        name=name,
-        email=email,
-        subject=subject,
-        class_name=class_name,
-        contact_number=contact_number
-    )
-    
-    db.session.add(new_teacher)
-    db.session.commit()
-    flash('Teacher added successfully!')
-    return redirect(url_for('teachers'))
+@app.route('/courses')
+def courses():
+    courses = Course.query.all()
+    return render_template('courses.html', courses=courses)
+
+# API Routes
+@app.route('/api/health')
+def health_check():
+    return jsonify({'status': 'healthy', 'database': 'connected'})
+
+@app.errorhandler(404)
+def not_found(error):
+    return render_template('404.html'), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return render_template('500.html'), 500
 
 if __name__ == '__main__':
-    init_db()  # Initialize database
-    app.run(debug=True)
+    # Initialize database before running
+    with app.app_context():
+        init_db()
+    
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=os.environ.get('FLASK_DEBUG', 'False').lower() == 'true')
