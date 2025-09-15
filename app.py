@@ -4,6 +4,11 @@ from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime
 import logging
+from flask import Flask, render_template
+
+@app.route('/page12')
+def page_12():
+    return render_template('12.html')
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
