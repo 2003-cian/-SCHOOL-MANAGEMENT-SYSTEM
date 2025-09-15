@@ -6,10 +6,12 @@ from datetime import datetime
 import logging
 from flask import Flask, render_template
 
+app = Flask(__name__)
+
+# This is the correct way to use the decorator
 @app.route('/page12')
 def page_12():
     return render_template('12.html')
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
